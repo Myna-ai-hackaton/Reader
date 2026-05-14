@@ -79,6 +79,7 @@ Return ONLY a single valid JSON object with this exact shape:
   "query_type": "release_notes|qa_risk|developer_forensics|pm_summary|firebase_inventory|general",
   "audience": "pm|qa|developer|mixed",
   "relevant_memory_evidence": ["short evidence item 1", "short evidence item 2"],
+  "likely_repositories": ["owner/repo"],
   "likely_files": ["path/to/file.py"],
   "likely_commits": ["abc1234"],
   "likely_keywords": ["auth", "login"],
@@ -96,8 +97,10 @@ Rules:
   analysis, or line-level details, set needs_repo_deep_dive = true.
 - If the Firebase memory is enough for a high-level PM / QA / release-notes /
   data-inventory answer, set can_answer_from_memory = true and needs_repo_deep_dive = false.
-- Pull likely_files, likely_commits, likely_keywords, and likely_symbols from
-  whatever the memory actually contains — do not invent exact paths or commits.
+- Pull likely_repositories, likely_files, likely_commits, likely_keywords, and likely_symbols from
+  whatever the memory actually contains — do not invent exact repos, paths, or commits.
+- If the user asks to verify, check the repo, inspect actual code, or find evidence in code,
+  set needs_repo_deep_dive = true.
 - Output ONLY the JSON object. No prose before or after.
 """
 
@@ -168,7 +171,12 @@ def analyze_memory_with_llm(query: str, memory_text: str) -> dict[str, Any]:
     """
     user_prompt = (
         f"User query:\n{query}\n\n"
-        "Arbitrary JSON memory (produced by another LLM, schema unknown):\n"
+        "Firebase database content loaded by the Reader Agent.\n"
+        "This JSON is the actual data currently visible to the Reader in Firebase. "
+        "If the user asks what exists in Firebase, describe this JSON. "
+        "If the user asks to verify code or find evidence in the GitHub repo, "
+        "request a repo deep-dive and identify likely repositories/files.\n\n"
+        "Firebase JSON memory, schema unknown:\n"
         "```json\n"
         f"{memory_text}\n"
         "```\n\n"
@@ -222,7 +230,10 @@ def generate_final_answer(
 
     user_prompt = (
         f"User query:\n{query}\n\n"
-        "Arbitrary JSON memory (schema unknown — read as structured notes):\n"
+        "Firebase database content loaded by the Reader Agent.\n"
+        "This JSON is the actual data currently visible to the Reader in Firebase. "
+        "If the user asks what exists in Firebase, answer from this JSON directly.\n\n"
+        "Firebase JSON memory, schema unknown:\n"
         "```json\n"
         f"{memory_text}\n"
         "```\n\n"
@@ -249,9 +260,75 @@ def generate_final_answer(
 # -----------------------------------------------------------------------------
 
 
+def _normalise_repo_inputs(
+    repo_path: str | None = None,
+    repo_paths: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a consistent {repo_name: local_path} map for deep-dives."""
+    if repo_paths:
+        return {str(name): str(path) for name, path in repo_paths.items() if path}
+    if repo_path:
+        return {"connected_repo": repo_path}
+    return {}
+
+
+def _select_repos_for_deep_dive(
+    all_repo_paths: dict[str, str],
+    likely_repositories: list[str] | None,
+) -> dict[str, str]:
+    """
+    Pick relevant repos from the connected project.
+
+    If the LLM identified likely repositories from Firebase memory, inspect
+    those first. If none match, inspect all connected repos.
+    """
+    if not all_repo_paths:
+        return {}
+
+    likely = [r.strip().lower() for r in (likely_repositories or []) if str(r).strip()]
+    if not likely:
+        return all_repo_paths
+
+    selected: dict[str, str] = {}
+    for repo_name, local_path in all_repo_paths.items():
+        repo_lower = repo_name.lower()
+        short_name = repo_lower.split("/")[-1]
+        for wanted in likely:
+            wanted_short = wanted.split("/")[-1]
+            if wanted == repo_lower or wanted_short == short_name or wanted in repo_lower:
+                selected[repo_name] = local_path
+                break
+
+    return selected or all_repo_paths
+
+
+def _format_multi_repo_deep_dive_for_prompt(deep_dive_result: dict[str, Any]) -> str:
+    """Render multi-repo deep-dive evidence for the final answer prompt."""
+    if not deep_dive_result:
+        return "No repo deep-dive was performed."
+
+    repositories = deep_dive_result.get("repositories", {})
+    if not repositories:
+        return "No repo deep-dive evidence was collected."
+
+    blocks: list[str] = []
+    for repo_name, repo_result in repositories.items():
+        blocks.append(f"\n================ Repository: {repo_name} ================")
+        blocks.append(format_deep_dive_for_prompt(repo_result))
+
+    errors = deep_dive_result.get("errors", [])
+    if errors:
+        blocks.append("\n================ Deep-dive errors ================")
+        for err in errors:
+            blocks.append(f"- {err}")
+
+    return "\n".join(blocks).strip()
+
+
 def run_reader_agent(
     query: str,
     repo_path: str | None = None,
+    repo_paths: dict[str, str] | None = None,
     max_memory_chars: int = 50_000,
 ) -> dict[str, Any]:
     """
@@ -261,15 +338,26 @@ def run_reader_agent(
         1. Load the full clean Firebase database.
         2. Serialize it as arbitrary JSON memory.
         3. Ask the LLM whether the memory is enough.
-        4. If needed, inspect the connected GitHub repo code.
+        4. If needed, inspect one or more connected GitHub repos.
         5. Generate the final answer.
 
-    There is no local JSON memory path.
-    There is no mock fallback.
-    There is no .myna/system_memory_index.json fallback.
+    `repo_paths` supports org/project mode:
+        {
+            "Myna-ai-hackaton/Writer": "C:/.../cache/Myna-ai-hackaton__Writer",
+            "Myna-ai-hackaton/Reader": "C:/.../cache/Myna-ai-hackaton__Reader"
+        }
     """
 
     trace: list[str] = []
+    connected_repo_paths = _normalise_repo_inputs(repo_path=repo_path, repo_paths=repo_paths)
+
+    if connected_repo_paths:
+        trace.append(
+            "Connected repo(s) available for code deep-dive: "
+            + ", ".join(connected_repo_paths.keys())
+        )
+    else:
+        trace.append("No connected Git repo paths are available for code deep-dive.")
 
     # --- Load memory from Firebase -----------------------------------------
     try:
@@ -285,9 +373,7 @@ def run_reader_agent(
 
     except Exception as exc:
         error_message = str(exc)
-
         trace.append(f"Firebase memory load error: {error_message}")
-
         return {
             "answer": (
                 "Could not run the Reader Agent because Firebase memory "
@@ -302,10 +388,8 @@ def run_reader_agent(
             },
         }
 
-    # --- Defensive check ----------------------------------------------------
     if loaded.get("raw") is None:
         trace.append("Firebase memory load error: loaded memory is empty.")
-
         return {
             "answer": (
                 "Could not run the Reader Agent because Firebase memory "
@@ -325,7 +409,6 @@ def run_reader_agent(
         loaded["raw"],
         max_chars=max_memory_chars,
     )
-
     memory_text = memory_payload["text"]
 
     trace.append(
@@ -346,39 +429,63 @@ def run_reader_agent(
     deep_dive_context: str | None = None
 
     if memory_analysis.get("needs_repo_deep_dive"):
-        if repo_path and validate_repo(repo_path):
-            trace.append(
-                f"Deep-dive requested; valid repo at {repo_path}. "
-                "Running focused Git/code inspection."
-            )
+        selected_repo_paths = _select_repos_for_deep_dive(
+            connected_repo_paths,
+            memory_analysis.get("likely_repositories", []) or [],
+        )
 
-            deep_dive_result = focused_repo_deep_dive(
-                repo_path=repo_path,
-                files=memory_analysis.get("likely_files", []) or [],
-                commits=memory_analysis.get("likely_commits", []) or [],
-                keywords=memory_analysis.get("likely_keywords", []) or [],
-                symbols=memory_analysis.get("likely_symbols", []) or [],
-            )
-
-            deep_dive_context = format_deep_dive_for_prompt(deep_dive_result)
+        if selected_repo_paths:
+            deep_dive_result = {
+                "repositories_considered": list(selected_repo_paths.keys()),
+                "likely_repositories": memory_analysis.get("likely_repositories", []) or [],
+                "repositories": {},
+                "errors": [],
+            }
 
             trace.append(
-                "Deep-dive complete: "
-                f"{len(deep_dive_result.get('commit_patches', []))} commits, "
-                f"{len(deep_dive_result.get('project_info_reads', []))} project-info reads, "
-                f"{len(deep_dive_result.get('file_reads', []))} file reads, "
-                f"{len(deep_dive_result.get('file_outlines', []))} outlines, "
-                f"{len(deep_dive_result.get('file_logs', []))} file logs, "
-                f"{len(deep_dive_result.get('grep_results', []))} grep hits, "
-                f"{len(deep_dive_result.get('grep_context', []))} context blocks."
+                "Deep-dive requested; inspecting repo(s): "
+                + ", ".join(selected_repo_paths.keys())
             )
+
+            for repo_name, local_path in selected_repo_paths.items():
+                if not validate_repo(local_path):
+                    msg = f"{repo_name}: invalid local Git repo path: {local_path}"
+                    deep_dive_result["errors"].append(msg)
+                    trace.append(f"Skipping {msg}")
+                    continue
+
+                trace.append(f"Running focused Git/code inspection for {repo_name}.")
+                try:
+                    repo_result = focused_repo_deep_dive(
+                        repo_path=local_path,
+                        files=memory_analysis.get("likely_files", []) or [],
+                        commits=memory_analysis.get("likely_commits", []) or [],
+                        keywords=memory_analysis.get("likely_keywords", []) or [],
+                        symbols=memory_analysis.get("likely_symbols", []) or [],
+                    )
+                    deep_dive_result["repositories"][repo_name] = repo_result
+                    trace.append(
+                        f"Deep-dive complete for {repo_name}: "
+                        f"{len(repo_result.get('commit_patches', []))} commits, "
+                        f"{len(repo_result.get('project_info_reads', []))} project-info reads, "
+                        f"{len(repo_result.get('file_reads', []))} file reads, "
+                        f"{len(repo_result.get('file_outlines', []))} outlines, "
+                        f"{len(repo_result.get('file_logs', []))} file logs, "
+                        f"{len(repo_result.get('grep_results', []))} grep hits, "
+                        f"{len(repo_result.get('grep_context', []))} context blocks."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    msg = f"{repo_name}: {exc}"
+                    deep_dive_result["errors"].append(msg)
+                    trace.append(f"Deep-dive failed for {repo_name}: {exc}")
+
+            deep_dive_context = _format_multi_repo_deep_dive_for_prompt(deep_dive_result)
 
         else:
             trace.append(
-                "Deep-dive requested but no valid Git repo path is available; "
+                "Deep-dive requested but no valid Git repo paths are available; "
                 "answering from Firebase memory only."
             )
-
     else:
         trace.append("Firebase memory deemed sufficient; skipping repo deep-dive.")
 
@@ -411,35 +518,24 @@ def run_reader_agent(
 
 
 def generate_release_notes(
-    memory_path: str | None = None,
     repo_path: str | None = None,
-    connected_memory_path: str | None = None,
-    use_firebase_memory: bool = False,
-    firebase_summary_id: str | None = None,
+    repo_paths: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
-    Special-cased query that asks the agent to produce release notes and
-    writes the answer to `reader/data/RELEASE_NOTES.md`.
-
-    Returns the same result shape as `run_reader_agent`, with an extra trace
-    entry confirming the file was written.
+    Ask the agent to produce release notes from Firebase memory and optional
+    connected repo evidence, then write `reader/data/RELEASE_NOTES.md`.
     """
     query = (
-        "Draft release notes from the current project memory. Group them "
+        "Draft release notes from the current Firebase project memory. Group them "
         "into New Features, Bug Fixes, Internal Improvements, and QA Notes."
     )
 
     result = run_reader_agent(
         query=query,
-        memory_path=memory_path,
         repo_path=repo_path,
-        connected_memory_path=connected_memory_path,
-        use_firebase_memory=use_firebase_memory,
-        firebase_summary_id=firebase_summary_id,
-)
+        repo_paths=repo_paths,
+    )
 
-    # Always try to write something — even an error message is useful to
-    # see in the downloaded file.
     RELEASE_NOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
     RELEASE_NOTES_PATH.write_text(result["answer"], encoding="utf-8")
     result["trace"].append(f"Saved release notes to {RELEASE_NOTES_PATH}")

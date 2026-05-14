@@ -465,3 +465,272 @@ def disconnect_repo(ref: RepoRef) -> bool:
         _clear_directory(target)
         return True
     return False
+
+# -----------------------------------------------------------------------------
+# GitHub organization / owner support
+# -----------------------------------------------------------------------------
+
+import json as _json
+import urllib.error as _urlerror
+import urllib.request as _urlrequest
+
+
+@dataclass(frozen=True)
+class OwnerRef:
+    """Canonical reference to a GitHub owner: user or organization."""
+
+    owner: str
+
+    @property
+    def slug(self) -> str:
+        return self.owner
+
+
+@dataclass
+class ConnectedProject:
+    """
+    A connected GitHub owner/project containing one or more cloned repos.
+
+    The Reader can use `repo_paths` to deep-dive across the whole project.
+    """
+
+    owner: str
+    repos: list[ConnectedRepo]
+    fetched_at: float
+    clone_errors: list[str]
+
+    @property
+    def slug(self) -> str:
+        return self.owner
+
+    @property
+    def repo_paths(self) -> dict[str, str]:
+        return {repo.ref.slug: str(repo.local_path) for repo in self.repos}
+
+    @property
+    def repo_count(self) -> int:
+        return len(self.repos)
+
+
+_OWNER_URL_PATTERNS = [
+    # https://github.com/owner
+    re.compile(r"^https?://github\.com/(?P<owner>[^/\s]+)/?$", re.IGNORECASE),
+    # github.com/owner
+    re.compile(r"^github\.com/(?P<owner>[^/\s]+)/?$", re.IGNORECASE),
+    # bare owner
+    re.compile(r"^(?P<owner>[^/\s]+)$"),
+]
+
+
+def parse_owner_url(raw: str) -> OwnerRef:
+    """
+    Parse a GitHub owner/org URL such as:
+        https://github.com/Myna-ai-hackaton
+        github.com/Myna-ai-hackaton
+        Myna-ai-hackaton
+    """
+    text = raw.strip().rstrip("/")
+    if not text:
+        raise ValueError("Empty GitHub owner reference.")
+
+    for pattern in _OWNER_URL_PATTERNS:
+        m = pattern.match(text)
+        if m:
+            owner = m.group("owner").strip()
+            if owner and owner.lower() not in {"github.com", "http:", "https:"}:
+                return OwnerRef(owner=owner)
+
+    raise ValueError(
+        f"Could not parse '{raw}' as a GitHub owner/org reference. "
+        "Expected something like 'Myna-ai-hackaton' or "
+        "'https://github.com/Myna-ai-hackaton'."
+    )
+
+
+def parse_github_target(raw: str) -> RepoRef | OwnerRef:
+    """
+    Parse either a specific repository URL or an organization/user URL.
+
+    Repo examples:
+        https://github.com/Myna-ai-hackaton/Writer
+        Myna-ai-hackaton/Writer
+
+    Owner examples:
+        https://github.com/Myna-ai-hackaton
+        github.com/Myna-ai-hackaton
+        Myna-ai-hackaton
+
+    Owner parsing is attempted first so `github.com/<owner>` is not
+    accidentally treated as the bare repo slug `github.com/<owner>`.
+    """
+    try:
+        return parse_owner_url(raw)
+    except ValueError:
+        return parse_repo_url(raw)
+
+
+def _github_api_get(url: str, token: str | None = None) -> tuple[int, Any]:
+    """Small stdlib GitHub API GET helper. Returns (status, decoded_json)."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "myna-ai-reader",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    request = _urlrequest.Request(url, headers=headers)
+    try:
+        with _urlrequest.urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, _json.loads(body) if body else None
+    except _urlerror.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload = _json.loads(body) if body else None
+        except Exception:  # noqa: BLE001
+            payload = body
+        return exc.code, payload
+
+
+def list_github_owner_repos(owner: str, token: str | None = None) -> list[RepoRef]:
+    """
+    List repositories for a GitHub organization or user.
+
+    We first try the organization endpoint, then the user endpoint. The token is
+    optional but needed for private organizations/repos.
+    """
+    repos: list[RepoRef] = []
+    errors: list[str] = []
+
+    for kind in ("orgs", "users"):
+        page = 1
+        while True:
+            url = (
+                f"https://api.github.com/{kind}/{owner}/repos"
+                f"?per_page=100&page={page}&type=all&sort=updated"
+            )
+            status, payload = _github_api_get(url, token=token)
+
+            if status == 404:
+                errors.append(f"{kind}/{owner}: not found")
+                break
+            if status == 401 or status == 403:
+                message = payload.get("message") if isinstance(payload, dict) else payload
+                raise RuntimeError(
+                    f"GitHub API denied access while listing repos for {owner}: {message}"
+                )
+            if status < 200 or status >= 300:
+                message = payload.get("message") if isinstance(payload, dict) else payload
+                raise RuntimeError(
+                    f"GitHub API failed while listing repos for {owner} "
+                    f"via /{kind}: HTTP {status}: {message}"
+                )
+            if not isinstance(payload, list):
+                raise RuntimeError(
+                    f"Unexpected GitHub API response while listing repos for {owner}: {payload!r}"
+                )
+            if not payload:
+                break
+
+            for item in payload:
+                full_name = item.get("full_name")
+                repo_name = item.get("name")
+                owner_login = (item.get("owner") or {}).get("login", owner)
+                if full_name and repo_name:
+                    repos.append(RepoRef(owner=owner_login, repo=repo_name))
+
+            if len(payload) < 100:
+                break
+            page += 1
+
+        if repos:
+            # The organization endpoint succeeded, or the user endpoint succeeded.
+            break
+
+    # Deduplicate while preserving order.
+    unique: list[RepoRef] = []
+    seen: set[str] = set()
+    for ref in repos:
+        if ref.slug not in seen:
+            unique.append(ref)
+            seen.add(ref.slug)
+
+    if not unique:
+        joined_errors = "; ".join(errors) if errors else "no repositories returned"
+        raise RuntimeError(f"No repositories found for GitHub owner '{owner}' ({joined_errors}).")
+
+    return unique
+
+
+def connect_github_target(
+    raw_url: str,
+    token: str | None = None,
+    depth: int = DEFAULT_CLONE_DEPTH,
+    force_refresh: bool = False,
+) -> ConnectedRepo | ConnectedProject:
+    """
+    Connect either a single GitHub repo URL or an owner/org URL.
+
+    If `raw_url` points to a repo, returns ConnectedRepo.
+    If `raw_url` points to an owner/org, lists all accessible repos and returns
+    ConnectedProject with every successfully cloned repo.
+    """
+    target = parse_github_target(raw_url)
+
+    if isinstance(target, RepoRef):
+        return connect_repo(
+            raw_url=f"https://github.com/{target.slug}",
+            token=token,
+            depth=depth,
+            force_refresh=force_refresh,
+        )
+
+    repo_refs = list_github_owner_repos(target.owner, token=token)
+    connected_repos: list[ConnectedRepo] = []
+    clone_errors: list[str] = []
+
+    for ref in repo_refs:
+        try:
+            connected_repos.append(
+                connect_repo(
+                    raw_url=f"https://github.com/{ref.slug}",
+                    token=token,
+                    depth=depth,
+                    force_refresh=force_refresh,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            clone_errors.append(f"{ref.slug}: {exc}")
+
+    if not connected_repos:
+        raise RuntimeError(
+            "Found repositories, but none could be cloned. "
+            + ("Errors: " + " | ".join(clone_errors) if clone_errors else "")
+        )
+
+    return ConnectedProject(
+        owner=target.owner,
+        repos=connected_repos,
+        fetched_at=time.time(),
+        clone_errors=clone_errors,
+    )
+
+
+def disconnect_target(target: ConnectedRepo | ConnectedProject) -> bool:
+    """Remove cached clone(s) for a connected repo or project."""
+    if isinstance(target, ConnectedProject):
+        removed = False
+        for repo in target.repos:
+            removed = disconnect_repo(repo.ref) or removed
+        return removed
+    return disconnect_repo(target.ref)
+
+
+def repo_paths_from_connected(target: ConnectedRepo | ConnectedProject | None) -> dict[str, str]:
+    """Return {full_repo_name: local_path} for the connected target."""
+    if target is None:
+        return {}
+    if isinstance(target, ConnectedProject):
+        return target.repo_paths
+    return {target.ref.slug: str(target.local_path)}
