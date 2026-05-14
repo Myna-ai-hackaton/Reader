@@ -4,50 +4,12 @@ app.py
 
 Streamlit UI for the Myna-ai Reader Agent.
 
-UX flow:
-    1.  User pastes a GitHub repo URL (and optionally a Personal Access
-        Token for private repos).
-    2.  We shallow-clone the repo into a local cache and look for
-        `.myna/system_memory_index.json` inside it.
-    3.  Once connected, the question UI unlocks. The agent uses the
-        in-repo memory (or falls back to the mock if the repo doesn't
-        have one yet) and can optionally deep-dive into the cloned code
-        when the LLM judges memory insufficient.
+The Reader loads project memory from Firebase and can connect to either:
+    - one GitHub repository URL, or
+    - a GitHub organization/user URL containing multiple repositories.
 
-This module is intentionally thin: it never implements agent or git
-logic itself. All real work lives in `reader_agent.py`, `repo_tools.py`,
-`reader_memory.py`, and `github_source.py`.
-
-==========================  SECURITY NOTES  ===================================
-
-The GitHub token is the most sensitive value this UI handles. Rules we
-follow here:
-
-1.  The token input uses `type="password"` so the value is masked in the
-    browser. Browser developer tools can still inspect form values, so
-    we additionally:
-    - Never write the token to `st.session_state` under a long-lived key;
-      we keep it only in `st.session_state["gh_token"]` which lives just
-      for the user's browser session.
-    - Never include the token in any displayed trace, error message,
-      JSON dump, or LLM prompt. `github_source` is responsible for
-      redacting it from any git error output before we ever see it here.
-
-2.  We do NOT persist the token to disk. There is no "remember me"
-    checkbox and no file write of the token, ever.
-
-3.  When showing connection status we display only the repo slug
-    (`owner/repo`), not the URL with the token in it.
-
-4.  Cache directories on disk contain ordinary git clones. After cloning,
-    `github_source.connect_repo()` rewrites the `origin` remote URL to a
-    token-free public URL, so the token is NOT stored in `.git/config`.
-
-5.  Per-user state isolation: Streamlit gives each browser session its
-    own `st.session_state`. Different users hitting the same server do
-    not share connected repos or tokens within memory.
-
-==============================================================================
+When the LLM decides Firebase memory is not enough, the agent deep-dives into
+one or more cloned repositories using safe read-only Git/code tools.
 """
 
 from __future__ import annotations
@@ -55,18 +17,15 @@ from __future__ import annotations
 import streamlit as st
 
 from github_source import (
+    ConnectedProject,
     ConnectedRepo,
     clear_cache,
-    connect_repo,
-    disconnect_repo,
+    connect_github_target,
+    disconnect_target,
     list_cached_repos,
+    repo_paths_from_connected,
 )
-from reader_agent import (
-    RELEASE_NOTES_PATH,
-    generate_release_notes,
-    run_reader_agent,
-)
-from reader_memory import MOCK_MEMORY_PATH
+from reader_agent import RELEASE_NOTES_PATH, generate_release_notes, run_reader_agent
 
 
 # -----------------------------------------------------------------------------
@@ -81,154 +40,145 @@ st.set_page_config(
 
 st.title("🪺 Myna-ai Reader")
 st.caption(
-    "An AI Git Project Manager. Point it at a GitHub repository — Myna's "
-    "memory file is found automatically — then ask PM, QA, or developer "
-    "questions. The agent can deep-dive into the cloned code when memory "
-    "alone isn't enough."
+    "An AI Git Project Manager. It reads Writer memory from Firebase, connects "
+    "to a GitHub repository or organization, and answers PM, QA, or developer "
+    "questions. When Firebase memory is not enough, it deep-dives into the "
+    "cloned code."
 )
 
-# --- Session state initialization -------------------------------------------
 
-# The connected repo (`ConnectedRepo` object) or None.
-if "connected_repo" not in st.session_state:
-    st.session_state.connected_repo = None
+# -----------------------------------------------------------------------------
+# Session state
+# -----------------------------------------------------------------------------
 
-# The user's last query result.
+if "connected_target" not in st.session_state:
+    st.session_state.connected_target = None
+
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
 
-# SECURITY: the token lives only in session state and only until the
-# Streamlit session ends (closing the tab). We never write it elsewhere.
+# Session-only token. Never persisted to disk.
 if "gh_token" not in st.session_state:
     st.session_state.gh_token = ""
 
-# Remembered repo URL across reruns (NOT the token).
 if "gh_url" not in st.session_state:
     st.session_state.gh_url = ""
 
 
 # -----------------------------------------------------------------------------
-# Sidebar — connection + advanced
+# Helpers
 # -----------------------------------------------------------------------------
 
-# These are populated inside the sidebar but read by the main panel.
-override_memory: str = ""
-override_repo: str = ""
+
+def describe_connected_target(target: ConnectedRepo | ConnectedProject) -> str:
+    if isinstance(target, ConnectedProject):
+        return f"{target.owner} ({target.repo_count} repo(s))"
+    return target.ref.slug
+
+
+def render_connected_details(target: ConnectedRepo | ConnectedProject) -> None:
+    if isinstance(target, ConnectedProject):
+        st.success(f"✅ Connected project: **{target.owner}**")
+        st.caption("Firebase memory is the primary source. GitHub repos are used for code verification.")
+        st.caption(f"📚 Repositories loaded: **{target.repo_count}**")
+        for repo in target.repos:
+            head = f" — HEAD `{repo.head_commit}`" if repo.head_commit else ""
+            st.caption(f"• `{repo.ref.slug}`{head}")
+        if target.clone_errors:
+            with st.expander("Clone warnings", expanded=False):
+                for err in target.clone_errors:
+                    st.warning(err)
+    else:
+        st.success(f"✅ Connected repository: **{target.ref.slug}**")
+        st.caption("Firebase memory is the primary source. This repo is used for code verification.")
+        if target.ref.branch:
+            st.caption(f"🔀 Branch: `{target.ref.branch}`")
+        if target.head_commit:
+            st.caption(f"⬢ HEAD: `{target.head_commit}`")
+        st.caption(f"🗂️ Cache: `{target.local_path}`")
+
+
+# -----------------------------------------------------------------------------
+# Sidebar
+# -----------------------------------------------------------------------------
 
 with st.sidebar:
-    st.header("Repository")
+    st.header("GitHub project")
 
-    connected: ConnectedRepo | None = st.session_state.connected_repo
+    connected = st.session_state.connected_target
 
-    # =========================================================================
-    # State 1 + 2: not connected (or connecting)
-    # =========================================================================
     if connected is None:
         st.caption(
-            "Paste a GitHub repo URL or `owner/repo`. The reader will clone "
-            "it locally and look for `.myna/system_memory_index.json`."
+            "Paste a GitHub repository URL or an organization/user URL. Examples: "
+            "`https://github.com/Myna-ai-hackaton/Writer` or "
+            "`https://github.com/Myna-ai-hackaton`."
         )
 
         url_input = st.text_input(
-            "GitHub repository",
+            "GitHub URL",
             value=st.session_state.gh_url,
-            placeholder="github.com/org/repo",
+            placeholder="https://github.com/Myna-ai-hackaton",
             key="gh_url_input",
         )
 
-        # SECURITY: password field masks the value in the browser. Token
-        # is read into a local variable and immediately handed to
-        # github_source — it is never logged or echoed.
         token_input = st.text_input(
-            "GitHub token (optional, for private repos)",
+            "GitHub token (optional, for private repos/orgs)",
             value=st.session_state.gh_token,
             type="password",
             help=(
-                "A Personal Access Token with `repo` scope. The token "
-                "stays on your machine — it's used only to clone, then "
-                "scrubbed from the local git config. We never write it "
-                "to disk and never send it to the LLM."
+                "A GitHub Personal Access Token. It is used only to list/clone "
+                "accessible repos and is never sent to the LLM."
             ),
             key="gh_token_input",
         )
 
         connect_clicked = st.button(
-            "Connect Repository",
+            "Connect",
             type="primary",
             use_container_width=True,
             disabled=not url_input.strip(),
         )
 
         if connect_clicked:
-            # Remember the URL (but not the token) for next time.
             st.session_state.gh_url = url_input.strip()
-            st.session_state.gh_token = token_input  # session-only
+            st.session_state.gh_token = token_input
 
             status = st.empty()
             try:
-                status.info("Resolving repository...")
-                # connect_repo handles parse → clone (with token) → locate
-                # `.myna/...json`. It raises on any failure with the token
-                # already redacted from the message.
-                repo = connect_repo(
+                status.info("Resolving GitHub target and cloning repo(s)...")
+                target = connect_github_target(
                     raw_url=url_input.strip(),
                     token=token_input or None,
                 )
-                st.session_state.connected_repo = repo
-                status.success(f"Connected to {repo.ref.slug}.")
+                st.session_state.connected_target = target
+                st.session_state.last_result = None
+                status.success(f"Connected to {describe_connected_target(target)}.")
                 st.rerun()
             except ValueError as exc:
-                status.error(f"Could not parse that URL: {exc}")
+                status.error(f"Could not parse that GitHub URL: {exc}")
             except RuntimeError as exc:
-                # github_source guarantees the token is redacted from this
-                # error message before it reaches us.
-                status.error(f"Clone failed: {exc}")
-            except Exception as exc:  # noqa: BLE001 — last-resort safety
+                status.error(f"GitHub connection failed: {exc}")
+            except Exception as exc:  # noqa: BLE001
                 status.error(f"Unexpected error: {exc}")
 
-    # =========================================================================
-    # State 3: connected
-    # =========================================================================
     else:
-        # SECURITY: only the safe `slug` is shown — never the URL form
-        # that could ever have contained a token.
-        st.success(f"✅ Connected: **{connected.ref.slug}**")
-
-        if connected.memory_path is not None:
-            rel = connected.memory_path.relative_to(connected.local_path)
-            st.caption(f"📦 Memory: `{rel}`")
-        else:
-            st.warning(
-                "📦 No Myna memory file in this repo yet "
-                "(`.myna/system_memory_index.json` not found). "
-                "Falling back to mock data."
-            )
-
-        if connected.ref.branch:
-            st.caption(f"🔀 Branch: `{connected.ref.branch}`")
-        if connected.head_commit:
-            st.caption(f"⬢ HEAD: `{connected.head_commit}`")
-        st.caption(f"🗂️  Cache: `{connected.local_path}`")
+        render_connected_details(connected)
 
         col_a, col_b = st.columns(2)
         with col_a:
             refresh_clicked = st.button("🔄 Refresh", use_container_width=True)
         with col_b:
-            disconnect_clicked = st.button(
-                "✖ Disconnect", use_container_width=True
-            )
+            disconnect_clicked = st.button("✖ Disconnect", use_container_width=True)
 
         if refresh_clicked:
-            with st.spinner("Re-fetching repository..."):
+            with st.spinner("Refreshing GitHub clone(s)..."):
                 try:
-                    # Reuse cache; just fetch latest. Token may have been
-                    # cleared, which is fine for public repos.
-                    repo = connect_repo(
-                        raw_url=f"https://github.com/{connected.ref.slug}",
+                    target = connect_github_target(
+                        raw_url=st.session_state.gh_url,
                         token=st.session_state.gh_token or None,
                         force_refresh=False,
                     )
-                    st.session_state.connected_repo = repo
+                    st.session_state.connected_target = target
                     st.session_state.last_result = None
                     st.rerun()
                 except Exception as exc:  # noqa: BLE001
@@ -236,53 +186,22 @@ with st.sidebar:
 
         if disconnect_clicked:
             try:
-                disconnect_repo(connected.ref)
-            except Exception:  # noqa: BLE001 — best-effort cleanup
+                disconnect_target(connected)
+            except Exception:  # noqa: BLE001
                 pass
-            # SECURITY: scrub the token from session state on disconnect
-            # so a subsequent user of the same browser session doesn't
-            # inherit it.
             st.session_state.gh_token = ""
-            st.session_state.connected_repo = None
+            st.session_state.connected_target = None
             st.session_state.last_result = None
             st.rerun()
 
-    # =========================================================================
-    # Advanced overrides (collapsed by default)
-    # =========================================================================
-    with st.expander("⚙️ Advanced", expanded=False):
-        st.caption(
-            "Manual overrides for debugging. Leave blank to use the "
-            "connected repository."
-        )
-
-        override_memory = st.text_input(
-            "Override memory JSON path",
-            value="",
-            help=(
-                "Skip the GitHub flow and load a memory JSON file directly "
-                "from disk. Useful for testing without a connection."
-            ),
-        )
-        override_repo = st.text_input(
-            "Override local Git repo path",
-            value="",
-            help=(
-                "Use a different local Git checkout for deep-dives instead "
-                "of the cached clone. Must be an absolute path."
-            ),
-        )
-
-        st.divider()
-        st.caption("**Cache**")
+    with st.expander("⚙️ Cache", expanded=False):
         cached = list_cached_repos()
         if cached:
             for entry in cached:
                 st.caption(f"• `{entry['name']}` — {entry['size_mb']} MB")
             if st.button("🗑️ Clear all cached repos"):
                 n = clear_cache()
-                # If the currently-connected repo got wiped, drop it.
-                st.session_state.connected_repo = None
+                st.session_state.connected_target = None
                 st.session_state.last_result = None
                 st.success(f"Removed {n} cached repo(s).")
                 st.rerun()
@@ -291,74 +210,39 @@ with st.sidebar:
 
 
 # -----------------------------------------------------------------------------
-# Resolve effective paths from session state + overrides
+# Effective repo paths
 # -----------------------------------------------------------------------------
 
-# Manual override wins. Then connected-repo memory. Then mock fallback.
-effective_memory_override: str | None = override_memory.strip() or None
-effective_connected_memory_path: str | None = None
-effective_repo_path: str | None = override_repo.strip() or None
-
-if effective_memory_override is None and connected is not None:
-    if connected.memory_path is not None:
-        effective_connected_memory_path = str(connected.memory_path)
-    # If the connected repo has no memory file, both stay None and
-    # `choose_memory_path` falls through to the mock.
-
-if effective_repo_path is None and connected is not None:
-    effective_repo_path = str(connected.local_path)
+connected = st.session_state.connected_target
+repo_paths = repo_paths_from_connected(connected)
 
 
 # -----------------------------------------------------------------------------
-# Main layout — two columns
+# Main layout
 # -----------------------------------------------------------------------------
 
 main_col, side_col = st.columns([2, 1])
 
-
-# ---------- Main column: query + answer --------------------------------------
-
 with main_col:
     st.subheader("Ask the Reader Agent")
 
-    # Only allow questions once a repo is connected OR an override is set.
-    can_ask = (
-        connected is not None
-        or effective_memory_override is not None
-        or effective_repo_path is not None
-    )
-
-    if not can_ask:
-        st.info(
-            "👈 Connect a repository in the sidebar to get started — or "
-            "use **Advanced → Override memory JSON path** to load a file "
-            "directly."
-        )
+    if connected is None:
+        st.info("👈 Connect a GitHub repository or organization in the sidebar to get started.")
     else:
-        # Show a note when we are silently falling back to mock data.
-        if (
-            connected is not None
-            and connected.memory_path is None
-            and effective_memory_override is None
-        ):
-            st.warning(
-                f"This repository doesn't have `.myna/system_memory_index.json` "
-                f"yet, so the agent is using the bundled mock memory at "
-                f"`{MOCK_MEMORY_PATH}`. Once your Writer pipeline produces "
-                f"that file inside the repo, the agent will pick it up "
-                f"automatically."
-            )
+        st.info(
+            "Memory source: Firebase. The connected GitHub repo(s) are used only "
+            "when the agent needs code-level evidence."
+        )
 
-        # Quick questions selectbox — populates the textarea below.
         quick_question = st.selectbox(
             "Quick questions (optional)",
             options=[
                 "",
-                "What should QA test?",
-                "Summarize recent changes for a PM update.",
-                "Why did we change the login logic and where is it implemented?",
-                "What are the riskiest changes and what should we test extra carefully?",
-                "Which database changes happened and what should we check before deploying?",
+                "What information exists in Firebase right now? List projects, developers, and PRs.",
+                "Summarize the latest PR for a project manager.",
+                "What should QA test based on the stored PR summaries?",
+                "Using Firebase and the GitHub repo, verify the most important code changes.",
+                "Which developer skills and roles are currently stored?",
             ],
             index=0,
         )
@@ -368,20 +252,16 @@ with main_col:
             value=quick_question,
             height=120,
             placeholder=(
-                "e.g. 'What should QA test?' or 'Why did we change the login "
-                "logic and where is it implemented?'"
+                "e.g. 'Using Firebase and the GitHub repo, verify whether PR 11 "
+                "changed scripts/agent_action.py and scripts/github_service.py.'"
             ),
         )
 
         btn_col1, btn_col2 = st.columns([1, 1])
         with btn_col1:
-            ask_clicked = st.button(
-                "Ask Agent", type="primary", use_container_width=True
-            )
+            ask_clicked = st.button("Ask Agent", type="primary", use_container_width=True)
         with btn_col2:
-            notes_clicked = st.button(
-                "Generate RELEASE_NOTES.md", use_container_width=True
-            )
+            notes_clicked = st.button("Generate RELEASE_NOTES.md", use_container_width=True)
 
         if ask_clicked:
             if not query.strip():
@@ -389,23 +269,25 @@ with main_col:
             else:
                 with st.spinner("Running the Reader Agent..."):
                     st.session_state.last_result = run_reader_agent(
-                    query=query,
-                    repo_path=effective_repo_path,
-                )
+                        query=query,
+                        repo_paths=repo_paths,
+                    )
 
         if notes_clicked:
             with st.spinner("Generating release notes..."):
                 st.session_state.last_result = generate_release_notes(
-                    memory_path=effective_memory_override,
-                    repo_path=effective_repo_path,
-                    connected_memory_path=effective_connected_memory_path,
+                    repo_paths=repo_paths,
                 )
 
-    # ---- Render the result ---------------------------------------------------
     result = st.session_state.last_result
     if result is not None:
         st.markdown("### Answer")
         st.markdown(result.get("answer", "_(no answer)_"))
+
+        metadata = result.get("memory_metadata", {})
+        source = metadata.get("source_path")
+        if source:
+            st.caption(f"Memory loaded from: `{source}`")
 
         if RELEASE_NOTES_PATH.exists():
             try:
@@ -421,13 +303,9 @@ with main_col:
 
         deep_dive_result = result.get("deep_dive_result")
         if deep_dive_result:
-            with st.expander(
-                "🔍 Focused repo deep-dive evidence", expanded=False
-            ):
+            with st.expander("🔍 Repo deep-dive evidence", expanded=False):
                 st.json(deep_dive_result)
 
-
-# ---------- Side column: trace + analysis ------------------------------------
 
 with side_col:
     st.subheader("Agent internals")
@@ -438,9 +316,6 @@ with side_col:
     else:
         with st.expander("Trace", expanded=True):
             for i, step in enumerate(result.get("trace", []), start=1):
-                # SECURITY: nothing in the trace ever contains the token —
-                # github_source guarantees this — but we still display each
-                # step verbatim and trust the lower layer's redaction.
                 st.markdown(f"{i}. {step}")
 
         with st.expander("LLM memory analysis (JSON)", expanded=False):
@@ -448,5 +323,3 @@ with side_col:
 
         with st.expander("Memory metadata", expanded=False):
             st.json(result.get("memory_metadata", {}))
-
-    
