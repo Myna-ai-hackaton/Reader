@@ -29,10 +29,13 @@ from typing import Any
 READER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = READER_DIR.parent
 
-# The Writer pipeline owns this file. Reader only ever reads from it.
+# The Writer pipeline owns this file inside a sibling `writer/` checkout.
+# Kept for backwards compatibility with the original monorepo layout, but
+# the canonical location is now `.myna/system_memory_index.json` inside any
+# Myna-enabled repo (see github_source.MEMORY_RELATIVE_PATH).
 REAL_MEMORY_PATH = PROJECT_ROOT / "writer" / "data" / "system_memory_index.json"
 
-# Local fallback so Reader works even before Writer has produced anything.
+# Local fallback so Reader works even before any repo is connected.
 MOCK_MEMORY_PATH = READER_DIR / "data" / "mock_system_memory_index.json"
 
 
@@ -40,17 +43,26 @@ MOCK_MEMORY_PATH = READER_DIR / "data" / "mock_system_memory_index.json"
 # Path selection
 # -----------------------------------------------------------------------------
 
-def choose_memory_path(path: str | None = None) -> Path:
+def choose_memory_path(
+    path: str | None = None,
+    connected_memory_path: Path | str | None = None,
+) -> Path:
     """
     Decide which JSON memory file to load.
 
     Precedence:
-        1. Explicit `path` argument (user override from the UI).
-        2. The real Writer output, if it exists on disk.
-        3. The bundled mock memory file.
+        1. Explicit `path` argument (user manual override from the UI).
+        2. `connected_memory_path` — the `.myna/system_memory_index.json`
+           found inside a freshly connected GitHub repo. Provided by the UI
+           after a successful `github_source.connect_repo(...)` call.
+        3. The legacy sibling-`writer/` path, if it exists on disk.
+        4. The bundled mock memory file (last-resort fallback so the agent
+           always has something to work with).
     """
     if path:
         return Path(path)
+    if connected_memory_path:
+        return Path(connected_memory_path)
     if REAL_MEMORY_PATH.exists():
         return REAL_MEMORY_PATH
     return MOCK_MEMORY_PATH
@@ -60,7 +72,10 @@ def choose_memory_path(path: str | None = None) -> Path:
 # Loading
 # -----------------------------------------------------------------------------
 
-def load_raw_memory(path: str | None = None) -> dict[str, Any]:
+def load_raw_memory(
+    path: str | None = None,
+    connected_memory_path: Path | str | None = None,
+) -> dict[str, Any]:
     """
     Load the memory JSON file as an arbitrary Python object.
 
@@ -73,7 +88,7 @@ def load_raw_memory(path: str | None = None) -> dict[str, Any]:
             "error":       <human-readable error string, or None on success>
         }
     """
-    memory_path = choose_memory_path(path)
+    memory_path = choose_memory_path(path, connected_memory_path)
 
     if not memory_path.exists():
         return {

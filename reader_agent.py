@@ -234,17 +234,22 @@ def run_reader_agent(
     memory_path: str | None = None,
     repo_path: str | None = None,
     max_memory_chars: int = 50_000,
+    connected_memory_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Run one full query end-to-end.
 
     Args:
-        query:            The user's natural-language question.
-        memory_path:      Optional override for the memory JSON file.
-                          When None, choose_memory_path picks Writer-or-mock.
-        repo_path:        Optional path to a local Git checkout for deep-dives.
-                          When None or invalid, no deep-dive is performed.
-        max_memory_chars: Soft cap on how much memory JSON is shown to the LLM.
+        query:                 The user's natural-language question.
+        memory_path:           Manual override for the memory JSON file
+                               (Advanced mode). Wins over everything else.
+        repo_path:             Path to a local Git checkout for deep-dives.
+                               When None or invalid, no deep-dive is performed.
+        max_memory_chars:      Soft cap on how much memory JSON is shown
+                               to the LLM.
+        connected_memory_path: Path to `.myna/system_memory_index.json`
+                               inside a freshly connected GitHub clone.
+                               Used when `memory_path` is not set.
 
     Returns:
         {
@@ -262,7 +267,10 @@ def run_reader_agent(
     trace: list[str] = []
 
     # --- Load memory --------------------------------------------------------
-    loaded = load_raw_memory(memory_path)
+    loaded = load_raw_memory(
+        path=memory_path,
+        connected_memory_path=connected_memory_path,
+    )
     trace.append(f"Loaded memory from: {loaded['source_path']}")
 
     if loaded["error"]:
@@ -359,6 +367,7 @@ def run_reader_agent(
 def generate_release_notes(
     memory_path: str | None = None,
     repo_path: str | None = None,
+    connected_memory_path: str | None = None,
 ) -> dict[str, Any]:
     """
     Special-cased query that asks the agent to produce release notes and
@@ -376,6 +385,7 @@ def generate_release_notes(
         query=query,
         memory_path=memory_path,
         repo_path=repo_path,
+        connected_memory_path=connected_memory_path,
     )
 
     # Always try to write something — even an error message is useful to
