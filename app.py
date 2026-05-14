@@ -389,11 +389,9 @@ with main_col:
             else:
                 with st.spinner("Running the Reader Agent..."):
                     st.session_state.last_result = run_reader_agent(
-                        query=query,
-                        memory_path=effective_memory_override,
-                        repo_path=effective_repo_path,
-                        connected_memory_path=effective_connected_memory_path,
-                    )
+                    query=query,
+                    repo_path=effective_repo_path,
+                )
 
         if notes_clicked:
             with st.spinner("Generating release notes..."):
@@ -450,3 +448,5 @@ with side_col:
 
         with st.expander("Memory metadata", expanded=False):
             st.json(result.get("memory_metadata", {}))
+
+    

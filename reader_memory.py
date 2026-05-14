@@ -36,7 +36,7 @@ PROJECT_ROOT = READER_DIR.parent
 REAL_MEMORY_PATH = PROJECT_ROOT / "writer" / "data" / "system_memory_index.json"
 
 # Local fallback so Reader works even before any repo is connected.
-MOCK_MEMORY_PATH = READER_DIR / "data" / "mock_system_memory_index.json"
+MOCK_MEMORY_PATH = READER_DIR / "Myna" / "mock_system_memory_index.json"
 
 
 # -----------------------------------------------------------------------------
