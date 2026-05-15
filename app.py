@@ -727,3 +727,18 @@ if __name__ == "__main__":
         pass  # Streamlit handles the rest automatically
 with team_tab:
     _render_team_tab(connected, repo_paths)
+
+
+
+# -----------------------------------------------------------------------------
+# Main entry point
+# -----------------------------------------------------------------------------
+
+
+if __name__ == "__main__":
+    # Check if running with CLI arguments
+    if len(sys.argv) > 1:
+        run_cli()
+    else:
+        # Run Streamlit app
+        pass  # Streamlit handles the rest automatically
