@@ -186,108 +186,75 @@ def _candidate_project_keys(repo_full_name: str) -> set[str]:
         candidates.add(f"{owner}_{repo}")
     return {c.strip() for c in candidates if c and c.strip()}
 
-
-def load_firebase_memory_for_projects(
-    project_names: list[str],
-) -> dict[str, Any]:
+def load_firebase_memory_for_projects(project_names: list[str]) -> dict[str, Any]:
     """
-    Load Firebase memory scoped to a specific set of projects.
-
-    Why this exists
-    ---------------
-    The original `load_full_firebase_memory()` dumps every collection and
-    every document. When the Reader is connected to repo X, but Firebase
-    also holds data for unrelated projects A, B, and C, the LLM sees ALL
-    of them and may answer questions about the wrong project. This loader
-    filters to only the documents matching the currently connected repos.
-
-    Matching strategy
-    -----------------
-    For each top-level collection (e.g. `myna_ai_info`):
-        - Look at every direct child document ID.
-        - Keep documents whose ID matches any candidate key derived from
-          the connected repo names (see `_candidate_project_keys`), using
-          case-insensitive comparison.
-        - Recurse with the matched documents only.
-
-    If no documents match any connected project, returns:
-        {
-          "__myna_note__": "No Firebase data exists for the connected project(s). ...",
-          "__connected_projects__": [...],
-          "__firebase_top_level_keys__": [...]  # so the LLM can suggest hints
-        }
-    This is intentional: better to say "we have nothing on this project"
-    than to silently fall back to data about a different project.
-
-    Args:
-        project_names: list of identifiers like 'owner/repo' or just 'repo'.
-                       Typically the keys of `repo_paths_from_connected(...)`.
-                       Empty list → returns the same "no scope" placeholder
-                       rather than dumping everything (intentional safety).
-
-    Raises:
-        Same as `load_full_firebase_memory` when the DB itself is empty.
+    Adapted for the 'Writer -> prs / developers' schema.
+    This specifically looks inside the PRs and Developers subcollections 
+    to find data matching the requested GitHub repo.
     """
     if not project_names:
         return {
-            "__myna_note__": (
-                "No GitHub project is connected, so Firebase memory was "
-                "not loaded. Connect a repository or organization first."
-            ),
-            "__connected_projects__": [],
+            "__myna_note__": "No GitHub project is connected.",
+            "__connected_projects__": []
         }
 
-    # Build the case-insensitive candidate set across all connected projects.
-    candidate_keys: set[str] = set()
-    for name in project_names:
-        candidate_keys.update(_candidate_project_keys(name))
-    lowered_candidates = {c.lower() for c in candidate_keys}
+    # Normalize project names so "osu-crypto/libOTe" matches "osu-crypto__libOTe" and "libOTe"
+    target_projects = []
+    for p in project_names:
+        target_projects.append(p.replace("/", "__").lower())
+        if "/" in p:
+            target_projects.append(p.split("/")[-1].lower())
 
     db = get_firestore_client()
+    
+    # Structure we will return to the LLM
+    scoped_memory = {"Writer": {"prs": {}, "developers": {}}}
+    found_data = False
 
-    scoped_memory: dict[str, Any] = {}
-    top_level_collection_ids: list[str] = []
+    # Support both root collections based on your code and screenshots
+    root_collections = ["myna_ai_info", "myna_ai_info2"]
 
-    for collection_ref in db.collections():
-        top_level_collection_ids.append(collection_ref.id)
-        matched_in_collection: dict[str, Any] = {}
+    for root in root_collections:
+        writer_doc = db.collection(root).document("Writer")
 
-        for doc_ref in collection_ref.list_documents():
-            if doc_ref.id.lower() not in lowered_candidates:
-                continue
+        # 1. Grab matching PRs
+        prs_ref = writer_doc.collection("prs")
+        for doc in prs_ref.list_documents():
+            # doc.id looks like "osu-crypto__libOTe_pr_124"
+            if any(t in doc.id.lower() for t in target_projects):
+                snap = doc.get()
+                if snap.exists:
+                    scoped_memory["Writer"]["prs"][doc.id] = make_json_safe(snap.to_dict())
+                    found_data = True
 
-            snapshot = doc_ref.get()
-            if snapshot.exists:
-                doc_data = make_json_safe(snapshot.to_dict() or {})
-            else:
-                doc_data = {}
+        # 2. Grab matching Developers
+        devs_ref = writer_doc.collection("developers")
+        for doc in devs_ref.list_documents():
+            snap = doc.get()
+            if snap.exists:
+                data = snap.to_dict() or {}
+                projects = data.get("projects", {})
+                
+                # Check if the developer contributed to the requested repo
+                is_match = False
+                for p_name in projects.keys():
+                    if any(t in p_name.lower() for t in target_projects):
+                        is_match = True
+                        break
+                        
+                if is_match:
+                    scoped_memory["Writer"]["developers"][doc.id] = make_json_safe(data)
+                    found_data = True
 
-            for sub_ref in doc_ref.collections():
-                doc_data[sub_ref.id] = dump_collection_raw(sub_ref)
-
-            matched_in_collection[doc_ref.id] = doc_data
-
-        if matched_in_collection:
-            scoped_memory[collection_ref.id] = matched_in_collection
-
-    if not scoped_memory:
-        # IMPORTANT: do NOT silently fall back to load_full_firebase_memory()
-        # here. Returning everything is exactly the bug that caused the
-        # Reader to answer about Writer while connected to an unrelated repo.
+    # If we found nothing, let the LLM know clearly
+    if not found_data:
         return {
             "__myna_note__": (
-                "Firebase has no documents matching the connected "
-                "project(s). The Reader can still answer questions using "
-                "the local repository code via deep-dive, but no "
-                "stored PR summaries or developer profiles exist for this "
-                "project yet."
+                "Firebase has no documents matching the connected project(s). "
+                "The Reader will answer using ONLY the local Git code."
             ),
-            "__connected_projects__": list(project_names),
-            "__firebase_top_level_keys__": top_level_collection_ids,
+            "__connected_projects__": list(project_names)
         }
 
-    scoped_memory["__connected_projects__"] = list(project_names)
-    return scoped_memory
-
-
-
+    # Wrap it in the expected root key so the schema guide matches
+    return {"myna_ai_info": scoped_memory}

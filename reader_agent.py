@@ -91,6 +91,27 @@ Return ONLY a single valid JSON object with this exact shape:
   "reason": "short explanation"
 }
 
+DATABASE SCHEMA GUIDE:
+The JSON memory contains two primary collections under the "Writer" document: "prs" and "developers". 
+
+1. FOR DEVELOPER QUESTIONS (Who is best, skills, comparisons, performance):
+Look inside the `developers` object. Every developer has a profile keyed by their GitHub handle. 
+Key fields to use for answering:
+- `overall_metrics`: Contains their total PRs merged/denied, average complexity, documentation, resilience, and quality scores. 
+- `skills`: A matrix of their coding skills, including experience level (Junior/Mid/Senior) and XP points.
+- `archetype_distribution`: Shows their coding style (architect, plumber, janitor, bug_squasher).
+- `projects`: Shows which repos they contribute to and their primary archetype per project.
+
+2. FOR CODE & PR QUESTIONS (What changed, who wrote what, risk, release notes):
+Look inside the `prs` object. Every PR is logged with a unique ID (e.g., repo_name_pr_123).
+Key fields to use for answering:
+- `author`: Who submitted the PR.
+- `timestamp`: When the PR was published/summarized.
+- `pr_overview`: A high-level summary of the PR.
+- `changes`: An array of specific changes, including a "category" (Feature/Bug Fix/Refactor), a "technical_description" for devs, and a "business_description" for PMs.
+- `risk_assessment`: The risk level (Low/Medium/High) and the reasoning behind it.
+- `core_files_touched`: An array of the main files modified in the PR.
+
 Rules:
 - Do not assume a fixed JSON schema. The Firebase memory could have ANY structure.
 - Treat collection names, document IDs, and nested JSON keys as meaningful evidence.
@@ -127,6 +148,26 @@ Critical interpretation rule:
 - Do NOT confuse "Firebase credential handling" mentioned inside a PR summary with the
   question of what data is currently stored in Firebase.
 
+DATABASE SCHEMA GUIDE:
+The JSON memory contains two primary collections under the "Writer" document: "prs" and "developers". 
+
+1. FOR DEVELOPER QUESTIONS (Who is best, skills, comparisons, performance):
+Look inside the `developers` object. Every developer has a profile keyed by their GitHub handle. 
+Key fields to use for answering:
+- `overall_metrics`: Contains their total PRs merged/denied, average complexity, documentation, resilience, and quality scores. 
+- `skills`: A matrix of their coding skills, including experience level (Junior/Mid/Senior) and XP points.
+- `archetype_distribution`: Shows their coding style (architect, plumber, janitor, bug_squasher).
+- `projects`: Shows which repos they contribute to and their primary archetype per project.
+
+2. FOR CODE & PR QUESTIONS (What changed, who wrote what, risk, release notes):
+Look inside the `prs` object. Every PR is logged with a unique ID (e.g., repo_name_pr_123).
+Key fields to use for answering:
+- `author`: Who submitted the PR.
+- `timestamp`: When the PR was published/summarized.
+- `pr_overview`: A high-level summary of the PR.
+- `changes`: An array of specific changes, including a "category" (Feature/Bug Fix/Refactor), a "technical_description" for devs, and a "business_description" for PMs.
+- `risk_assessment`: The risk level (Low/Medium/High) and the reasoning behind it.
+- `core_files_touched`: An array of the main files modified in the PR.
 Rules:
 - Do not assume a fixed schema for the Firebase memory. It may have any structure.
 - Use ONLY the evidence provided. Do not invent commits, files, tickets, PRs,

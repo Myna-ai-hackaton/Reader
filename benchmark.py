@@ -91,13 +91,13 @@ def cat_label(category: str) -> str:
 
 QUESTIONS = [
     {"id": 1,  "category": "Retrieval", "q": "How many PRs were merged in the last 2 weeks, and who authored them?"},
-    {"id": 2,  "category": "Retrieval", "q": "Which PRs are currently open and how long have they been open?"},
-    {"id": 3,  "category": "Velocity",  "q": "Is the team's PR merge rate increasing or decreasing vs last month?"},
-    {"id": 4,  "category": "Velocity",  "q": "What is the average time from PR open to merge across the last 20 PRs?"},
+    {"id": 2,  "category": "Retrieval", "q": "What are the top 5 files or components that changed the most across recent PRs?"},
+    {"id": 3,  "category": "Velocity",  "q": "What types of changes (features, bug fixes, refactors) has the team been working on?"},
+    {"id": 4,  "category": "Velocity",  "q": "What is the overall code quality trend based on recent PR risk assessments?"},
     {"id": 5,  "category": "People",    "q": "Which developer has been most active this month, and what have they worked on?"},
-    {"id": 6,  "category": "People",    "q": "Are there any developers who have gone quiet or dropped off recently?"},
+    {"id": 6,  "category": "People",    "q": "Who are the top 3 most skilled developers based on their skill matrix?"},
     {"id": 7,  "category": "Risk",      "q": "Are there signs of review bottlenecks, stale PRs, or single points of failure?"},
-    {"id": 8,  "category": "Risk",      "q": "Which PRs received the most review comments or took longest to merge?"},
+    {"id": 8,  "category": "Risk",      "q": "What are the most common risk levels and types in recent PRs?"},
     {"id": 9,  "category": "Synthesis", "q": "Give me a one-paragraph team health summary for a stakeholder update."},
     {"id": 10, "category": "Synthesis", "q": "What are the top 3 things I should focus on as a PM this week?"},
     {
