@@ -96,14 +96,17 @@ Rules:
 - Treat collection names, document IDs, and nested JSON keys as meaningful evidence.
 - If the query asks what is stored in Firebase, list the projects/developers/PRs/data
   visible in the JSON memory.
-- If the query asks for an exact code location, implementation details, root cause
-  analysis, or line-level details, set needs_repo_deep_dive = true.
 - If the Firebase memory is enough for a high-level PM / QA / release-notes /
   data-inventory answer, set can_answer_from_memory = true and needs_repo_deep_dive = false.
+- For questions about recent activity, PRs, merges, or code changes: Even if Firebase lacks this data,
+  set needs_repo_deep_dive = true to check Git history, commit logs, and repository activity.
+- For questions about current state (open PRs, issues, active branches): Even if Firebase lacks this data,
+  set needs_repo_deep_dive = true to inspect repository status and recent activity.
 - Pull likely_repositories, likely_files, likely_commits, likely_keywords, and likely_symbols from
   whatever the memory actually contains — do not invent exact repos, paths, or commits.
 - If the user asks to verify, check the repo, inspect actual code, or find evidence in code,
   set needs_repo_deep_dive = true.
+- For time-based questions (last 2 weeks, recent activity), always consider deep-dive to check Git logs.
 - Output ONLY the JSON object. No prose before or after.
 """
 
@@ -130,12 +133,18 @@ Rules:
   developers, projects, or metrics that are not in the evidence.
 - Cite repository names, PR numbers, developer handles, file paths, function/class names,
   and line numbers whenever the evidence provides them.
-- If the evidence is insufficient to answer fully, say clearly what is missing.
+- If the evidence is insufficient to answer fully, say clearly what is missing AND provide actionable alternatives:
+  * For PR/merge questions: Suggest checking GitHub directly, using Git commands like 'git log --oneline --since="2 weeks ago"', or setting up PR tracking in Firebase
+  * For open issues/PRs: Recommend GitHub API queries, manual repository checks, or implementing issue tracking
+  * For code locations: Suggest grep searches, file exploration, or code review processes
+  * For metrics/data: Propose data collection strategies or alternative data sources
+- When data is missing, focus on what CAN be done rather than just what cannot
 - Tailor the tone to the audience:
-    * PMs: focus on product / business impact, user-facing changes, risk.
-    * QA:  give concrete test recommendations and risk areas.
-    * Developers: include technical details, files, commits, and implementation clues.
+    * PMs: focus on product / business impact, user-facing changes, risk, and concrete next steps
+    * QA:  give concrete test recommendations, risk areas, and verification approaches
+    * Developers: include technical details, files, commits, implementation clues, and debugging strategies
 - Keep the answer well-structured with short headings or bullets when useful.
+- Always provide value even when complete data is unavailable - suggest investigation approaches, workarounds, or data collection improvements.
 """
 
 
