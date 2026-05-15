@@ -38,7 +38,10 @@ from repo_tools import (
     validate_repo,
 )
 
-from firebase_memory import load_full_firebase_memory
+from firebase_memory import (
+    load_firebase_memory_for_projects,
+    load_full_firebase_memory,
+)
 
 # -----------------------------------------------------------------------------
 # Paths
@@ -360,16 +363,37 @@ def run_reader_agent(
         trace.append("No connected Git repo paths are available for code deep-dive.")
 
     # --- Load memory from Firebase -----------------------------------------
+    # Scope to the connected project(s) when we have any, so the LLM cannot
+    # answer about an unrelated project that happens to live in the same
+    # Firestore. When nothing is connected we fall back to the legacy full
+    # dump (matches old behaviour for callers that don't pass repo_paths).
     try:
-        firebase_memory = load_full_firebase_memory()
+        if connected_repo_paths:
+            project_names = list(connected_repo_paths.keys())
+            firebase_memory = load_firebase_memory_for_projects(project_names)
+            source_label = (
+                "firebase:projects=" + ",".join(project_names)
+            )
+            trace.append(
+                f"Loaded Firebase memory scoped to: {', '.join(project_names)}"
+            )
+            # Flag the "no matching data" case to the trace so the user
+            # understands why answers may be short.
+            if isinstance(firebase_memory, dict) and "__myna_note__" in firebase_memory:
+                trace.append(
+                    "Note: Firebase has no documents matching the connected "
+                    "project. The agent will rely on code deep-dive only."
+                )
+        else:
+            firebase_memory = load_full_firebase_memory()
+            source_label = "firebase:full_database"
+            trace.append("Loaded memory from Firebase: firebase:full_database")
 
         loaded: dict[str, Any] = {
             "raw": firebase_memory,
-            "source_path": "firebase:full_database",
+            "source_path": source_label,
             "error": None,
         }
-
-        trace.append("Loaded memory from Firebase: firebase:full_database")
 
     except Exception as exc:
         error_message = str(exc)

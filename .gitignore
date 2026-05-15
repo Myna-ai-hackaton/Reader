@@ -4,3 +4,5 @@ cache/
 secrets/
 firebase-service-account.json
 test_full.py
+check_db_structure.py
+firebase_dump.json
