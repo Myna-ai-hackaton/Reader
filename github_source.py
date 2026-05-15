@@ -275,9 +275,54 @@ def _get_head_short_sha(repo_path: Path) -> str | None:
         return None
 
 
+def _on_rm_error(func, path, exc_info):
+    """
+    rmtree onerror handler that fixes the #1 cause of "rmtree silently
+    failed" on Windows: read-only files inside `.git/objects/pack/`.
+
+    Git marks pack files read-only on Windows. `shutil.rmtree` with
+    `ignore_errors=True` then silently fails to delete them, leaving the
+    cache directory looking healthy in code while remaining on disk.
+
+    This handler is invoked once per failing path. We chmod the path
+    writable and retry the original operation (usually os.unlink). If
+    that still fails, we re-raise — so the caller knows about it instead
+    of pretending success.
+
+    Works on POSIX too: chmod 0o777 on an already-writable file is a no-op.
+    """
+    import os
+    import stat
+
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+    except Exception:  # noqa: BLE001 — best effort
+        pass
+    # Retry whatever rmtree was trying to do (os.unlink / os.rmdir / os.scandir).
+    func(path)
+
+
 def _clear_directory(path: Path) -> None:
-    """Remove a directory tree, tolerating missing or partial paths."""
-    if path.exists():
+    """
+    Remove a directory tree.
+
+    Uses a custom onerror handler that fixes read-only files on Windows
+    (a notorious problem with `.git/objects/pack/*.pack` and `*.idx`
+    files that Git marks read-only). After the handler retries, any
+    remaining failure is silently swallowed — we don't want a stale
+    cache to crash the UI.
+    """
+    if not path.exists():
+        return
+    try:
+        # Python 3.12+: prefer `onexc` over the deprecated `onerror`.
+        shutil.rmtree(path, onexc=_on_rm_error)  # type: ignore[call-arg]
+    except TypeError:
+        # Older Python: fall back to `onerror`.
+        shutil.rmtree(path, onerror=_on_rm_error)
+    except Exception:
+        # Even the handler couldn't fix it (locked file, etc.). Try one
+        # more time with ignore_errors so we at least delete what we can.
         shutil.rmtree(path, ignore_errors=True)
 
 
@@ -451,6 +496,33 @@ def clear_cache() -> int:
             _clear_directory(child)
             count += 1
     return count
+
+
+def clear_repo_cache() -> None:
+    """
+    Wipe the entire local GitHub clone cache and recreate it empty.
+
+    This is the function the UI should call on Disconnect, and BEFORE
+    connecting to a new target, to make sure no stale cloned repos can
+    leak into the next session.
+
+    Safety:
+        - We only ever touch CACHE_ROOT, which is a fixed path under the
+          Reader package directory (`<reader>/cache`). We never delete
+          anything outside it.
+        - Uses `_clear_directory` which handles Windows read-only `.git`
+          files correctly (the cause of the "Disconnect didn't actually
+          empty the cache" bug we hit in testing).
+        - The directory is recreated empty so subsequent clones land in a
+          known location.
+    """
+    # Defensive: never delete something that's not under our cache root.
+    if CACHE_ROOT.parent != READER_DIR:
+        raise RuntimeError(
+            f"Refusing to clear cache: unexpected CACHE_ROOT location {CACHE_ROOT}"
+        )
+    _clear_directory(CACHE_ROOT)
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def disconnect_repo(ref: RepoRef) -> bool:

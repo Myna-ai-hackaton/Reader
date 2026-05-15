@@ -20,6 +20,7 @@ from github_source import (
     ConnectedProject,
     ConnectedRepo,
     clear_cache,
+    clear_repo_cache,
     connect_github_target,
     disconnect_target,
     list_cached_repos,
@@ -70,6 +71,62 @@ if "gh_url" not in st.session_state:
 # -----------------------------------------------------------------------------
 
 
+# Keys that hold connection/result state. We clear these on disconnect and
+# before connecting to a new target so stale repos cannot leak across runs.
+#
+# `gh_token` is treated separately because we want Disconnect to scrub it
+# (clear_token=True) but a new Connect should preserve whatever the user just
+# typed (clear_token=False).
+#
+# Widget keys (`gh_url_input`, `gh_token_input`) are intentionally NOT in this
+# list — Streamlit manages those itself and deleting them mid-script can break
+# the next render.
+_CONNECTION_STATE_KEYS = (
+    "connected_target",
+    "last_result",
+    "gh_url",
+    # Forward-compatible: clear these too if any older code path ever sets them.
+    "connected_project",
+    "connected_repo",
+    "connected_repo_path",
+    "connected_repo_paths",
+    "repo_paths",
+    "github_target",
+    "github_url",
+    "last_answer",
+    "last_trace",
+    "connected_memory_path",
+    "effective_connected_memory_path",
+)
+
+
+def clear_connection_state(clear_token: bool = False) -> None:
+    """
+    Reset every piece of in-memory connection state and clear the last
+    answer/result. Must be called:
+        - on Disconnect (with clear_token=True), and
+        - BEFORE attempting a new Connect (with clear_token=False),
+    so a failed or successful new connection cannot inherit stale repo
+    paths or stale results from a previous target.
+
+    Safe to call when nothing is connected — every key access is guarded.
+    """
+    for key in _CONNECTION_STATE_KEYS:
+        # Re-initialise the two keys app.py expects to read unconditionally;
+        # remove the rest entirely so they can't shadow a fresh value.
+        if key == "connected_target":
+            st.session_state.connected_target = None
+        elif key == "last_result":
+            st.session_state.last_result = None
+        elif key == "gh_url":
+            st.session_state.gh_url = ""
+        else:
+            st.session_state.pop(key, None)
+
+    if clear_token:
+        st.session_state.gh_token = ""
+
+
 def describe_connected_target(target: ConnectedRepo | ConnectedProject) -> str:
     if isinstance(target, ConnectedProject):
         return f"{target.owner} ({target.repo_count} repo(s))"
@@ -106,8 +163,9 @@ with st.sidebar:
     st.header("GitHub project")
 
     connected = st.session_state.connected_target
-
+    
     if connected is None:
+        st.info("No GitHub repository or organization connected.")
         st.caption(
             "Paste a GitHub repository URL or an organization/user URL. Examples: "
             "`https://github.com/Myna-ai-hackaton/Writer` or "
@@ -140,23 +198,43 @@ with st.sidebar:
         )
 
         if connect_clicked:
-            st.session_state.gh_url = url_input.strip()
-            st.session_state.gh_token = token_input
+            # Capture the user's input BEFORE we wipe state — clear_connection_state
+            # resets gh_url/last_result/connected_target, which is exactly what we
+            # want, but we still need the URL the user just typed.
+            new_url = url_input.strip()
+            new_token = token_input  # session-only; not written to disk
+
+            # Step 1: nuke every trace of the previous connection before we
+            # touch anything new. This guarantees that if the new connection
+            # fails for any reason, the app falls into the disconnected state
+            # rather than continuing to use the old target.
+            try:
+                clear_repo_cache()
+            except Exception:  # noqa: BLE001 — never let cleanup crash the UI
+                pass
+            clear_connection_state(clear_token=False)
+
+            # Step 2: persist the new inputs so the Refresh button (which reads
+            # st.session_state.gh_url) can re-use them later.
+            st.session_state.gh_url = new_url
+            st.session_state.gh_token = new_token
 
             status = st.empty()
             try:
                 status.info("Resolving GitHub target and cloning repo(s)...")
                 target = connect_github_target(
-                    raw_url=url_input.strip(),
-                    token=token_input or None,
+                    raw_url=new_url,
+                    token=new_token or None,
                 )
                 st.session_state.connected_target = target
                 st.session_state.last_result = None
                 status.success(f"Connected to {describe_connected_target(target)}.")
                 st.rerun()
             except ValueError as exc:
+                # Parse error: state is already clean from Step 1.
                 status.error(f"Could not parse that GitHub URL: {exc}")
             except RuntimeError as exc:
+                # Clone/network/auth error: state is already clean from Step 1.
                 status.error(f"GitHub connection failed: {exc}")
             except Exception as exc:  # noqa: BLE001
                 status.error(f"Unexpected error: {exc}")
@@ -185,13 +263,19 @@ with st.sidebar:
                     st.error(f"Refresh failed: {exc}")
 
         if disconnect_clicked:
+            # Wipe local clones from disk first. We use clear_repo_cache() (full
+            # cache reset) rather than disconnect_target() (which only removes
+            # this specific target's directories) so no orphaned clones from
+            # crashes / interrupted sessions can survive.
             try:
-                disconnect_target(connected)
-            except Exception:  # noqa: BLE001
+                clear_repo_cache()
+            except Exception:  # noqa: BLE001 — never let cleanup crash the UI
                 pass
-            st.session_state.gh_token = ""
-            st.session_state.connected_target = None
-            st.session_state.last_result = None
+
+            # Then scrub every piece of in-memory state, including the token.
+            clear_connection_state(clear_token=True)
+
+            st.success("Disconnected and cleared cached repositories.")
             st.rerun()
 
     with st.expander("⚙️ Cache", expanded=False):
@@ -201,8 +285,10 @@ with st.sidebar:
                 st.caption(f"• `{entry['name']}` — {entry['size_mb']} MB")
             if st.button("🗑️ Clear all cached repos"):
                 n = clear_cache()
-                st.session_state.connected_target = None
-                st.session_state.last_result = None
+                # If we just wiped clones the active target depends on,
+                # reset connection state so the UI doesn't keep pointing
+                # at directories that no longer exist on disk.
+                clear_connection_state(clear_token=False)
                 st.success(f"Removed {n} cached repo(s).")
                 st.rerun()
         else:
