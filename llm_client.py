@@ -77,6 +77,42 @@ def chat(system: str, user: str, temperature: float = 0.1) -> str:
     return response.choices[0].message.content or ""
 
 
+def chat_stream(system: str, user: str, temperature: float = 0.1):
+    """
+    Same as `chat` but yields text chunks as the model produces them.
+
+    Designed for `st.write_stream(chat_stream(...))` so the UI feels
+    responsive while the model is still generating. Each yielded value is
+    a short string fragment (a few tokens). The generator ends when the
+    model's response is complete.
+
+    If the streaming endpoint errors mid-response, the partial text that
+    arrived before the error is still yielded; the caller can decide
+    whether the partial answer is usable. Network errors at the start of
+    the stream propagate as exceptions because there is nothing useful
+    to yield.
+    """
+    client = get_client()
+    response = client.chat.completions.create(
+        model=get_model(),
+        temperature=temperature,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        stream=True,
+    )
+    for chunk in response:
+        # Defensive: some providers occasionally emit chunks with no
+        # `choices` (keep-alive frames). Skip those without raising.
+        if not getattr(chunk, "choices", None):
+            continue
+        delta = chunk.choices[0].delta
+        piece = getattr(delta, "content", None)
+        if piece:
+            yield piece
+
+
 # -----------------------------------------------------------------------------
 # JSON-mode helpers (resilient to chatty local models)
 # -----------------------------------------------------------------------------
