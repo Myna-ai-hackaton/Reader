@@ -10,10 +10,139 @@ The Reader loads project memory from Firebase and can connect to either:
 
 When the LLM decides Firebase memory is not enough, the agent deep-dives into
 one or more cloned repositories using safe read-only Git/code tools.
+
+This module also supports CLI usage for headless operation.
 """
 
 from __future__ import annotations
 
+import argparse
+import sys
+from pathlib import Path
+
+# Check if running in CLI mode before importing Streamlit
+if __name__ == "__main__" and len(sys.argv) > 1:
+    # CLI mode - import only what we need
+    from github_source import connect_github_target, disconnect_target, repo_paths_from_connected
+    from reader_agent import RELEASE_NOTES_PATH, generate_release_notes, run_reader_agent
+
+    def run_cli():
+        """Run the Reader Agent in CLI mode."""
+        parser = argparse.ArgumentParser(
+            description="Myna-ai Reader Agent - Query project memory and GitHub repositories",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+Examples:
+  python app.py --github-url https://github.com/owner/repo --query "What PRs exist?"
+  python app.py --github-url https://github.com/owner/repo --token ghp_... --query "Summarize recent changes"
+  python app.py --github-url https://github.com/owner/repo --release-notes
+
+Requirements:
+  - Firebase service account JSON file at: Reader/secrets/firebase-service-account.json
+  - OpenAI API key configured via OPENAI_API_KEY environment variable (or OPENAI_BASE_URL for local models)
+            """,
+        )
+
+        parser.add_argument(
+            "--github-url",
+            required=True,
+            help="GitHub repository or organization URL (e.g., https://github.com/owner/repo)",
+        )
+
+        parser.add_argument(
+            "--token",
+            help="GitHub Personal Access Token (optional, for private repos/orgs)",
+        )
+
+        group = parser.add_mutually_exclusive_group(required=True)
+        group.add_argument(
+            "--query",
+            help="Question to ask the Reader Agent",
+        )
+        group.add_argument(
+            "--release-notes",
+            action="store_true",
+            help="Generate RELEASE_NOTES.md from project memory",
+        )
+
+        args = parser.parse_args()
+
+        # Validate required credentials before proceeding
+        print("🔍 Validating credentials...")
+
+        # Check Firebase service account file
+        firebase_key_path = Path(__file__).parent / "secrets" / "firebase-service-account.json"
+        if not firebase_key_path.exists():
+            print(f"❌ Firebase service account file not found: {firebase_key_path}")
+            print("   Please ensure the Firebase credentials are available.")
+            sys.exit(1)
+
+        # Check OpenAI API configuration
+        import os
+        openai_base_url = os.getenv("OPENAI_BASE_URL")
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+
+        if not openai_base_url and not openai_api_key:
+            print("❌ OpenAI API configuration missing.")
+            print("   Set OPENAI_API_KEY for cloud API or OPENAI_BASE_URL for local models.")
+            sys.exit(1)
+
+        print("✅ Credentials validated.")
+
+        try:
+            print("🔗 Connecting to GitHub target and cloning repo(s)...")
+            target = connect_github_target(
+                raw_url=args.github_url,
+                token=args.token,
+            )
+
+            if hasattr(target, 'owner'):
+                print(f"✅ Connected to project: {target.owner} ({target.repo_count} repos)")
+            else:
+                print(f"✅ Connected to repository: {target.ref.slug}")
+
+            repo_paths = repo_paths_from_connected(target)
+
+            if args.release_notes:
+                print("📝 Generating release notes...")
+                result = generate_release_notes(repo_paths=repo_paths)
+                print("\n" + "="*50)
+                print("RELEASE NOTES")
+                print("="*50)
+                print(result["answer"])
+                if RELEASE_NOTES_PATH.exists():
+                    print(f"\n📄 Release notes also saved to: {RELEASE_NOTES_PATH}")
+            else:
+                print(f"🤔 Processing query: {args.query}")
+                result = run_reader_agent(
+                    query=args.query,
+                    repo_paths=repo_paths,
+                )
+                print("\n" + "="*50)
+                print("ANSWER")
+                print("="*50)
+                print(result["answer"])
+
+            # Clean up connection
+            try:
+                disconnect_target(target)
+            except Exception:
+                pass  # Ignore cleanup errors
+
+        except ValueError as exc:
+            print(f"❌ Invalid GitHub URL: {exc}")
+            sys.exit(1)
+        except RuntimeError as exc:
+            print(f"❌ GitHub connection failed: {exc}")
+            sys.exit(1)
+        except Exception as exc:
+            print(f"❌ Unexpected error: {exc}")
+            sys.exit(1)
+
+    run_cli()
+    sys.exit(0)
+
+# Streamlit mode - import Streamlit and related modules
 import streamlit as st
 
 from github_source import (
@@ -580,5 +709,21 @@ ask_tab, team_tab = st.tabs(["💬 Ask", "👥 Team"])
 with ask_tab:
     _render_ask_tab(connected, repo_paths)
 
+        with st.expander("Memory metadata", expanded=False):
+            st.json(result.get("memory_metadata", {}))
+
+
+# -----------------------------------------------------------------------------
+# Main entry point
+# -----------------------------------------------------------------------------
+
+
+if __name__ == "__main__":
+    # Check if running with CLI arguments
+    if len(sys.argv) > 1:
+        run_cli()
+    else:
+        # Run Streamlit app
+        pass  # Streamlit handles the rest automatically
 with team_tab:
     _render_team_tab(connected, repo_paths)
