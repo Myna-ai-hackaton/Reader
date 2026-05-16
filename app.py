@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+import os
 
 # Check if running in CLI mode before importing Streamlit
 if __name__ == "__main__" and len(sys.argv) > 1:
@@ -68,52 +69,64 @@ Requirements:
         args = parser.parse_args()
 
         # Validate required credentials before proceeding
-        print("🔍 Validating credentials...")
+        print("Validating credentials...")
 
         # Check Firebase service account file
         firebase_key_path = Path(__file__).parent / "secrets" / "firebase-service-account.json"
         if not firebase_key_path.exists():
-            print(f"❌ Firebase service account file not found: {firebase_key_path}")
+            print(f"ERROR: Firebase service account file not found: {firebase_key_path}")
             print("   Please ensure the Firebase credentials are available.")
             sys.exit(1)
 
         # Check OpenAI API configuration
-        import os
-        openai_base_url = os.getenv("OPENAI_BASE_URL")
-        openai_api_key = os.getenv("OPENAI_API_KEY")
+        llm_provider = os.getenv("LLM_PROVIDER", "openai").lower().strip()
 
-        if not openai_base_url and not openai_api_key:
-            print("❌ OpenAI API configuration missing.")
-            print("   Set OPENAI_API_KEY for cloud API or OPENAI_BASE_URL for local models.")
-            sys.exit(1)
+        if llm_provider in {"gemini", "google"}:
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
 
-        print("✅ Credentials validated.")
+            if not gemini_api_key:
+                print("ERROR: Gemini API configuration missing.")
+                print("   Set GEMINI_API_KEY in your .env file.")
+                sys.exit(1)
+
+        else:
+            openai_base_url = os.getenv("OPENAI_BASE_URL")
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+
+            if not openai_base_url and not openai_api_key:
+                print("ERROR: OpenAI API configuration missing.")
+                print("   Set OPENAI_API_KEY for cloud API or OPENAI_BASE_URL for local models.")
+                print("   Or set LLM_PROVIDER=gemini and GEMINI_API_KEY.")
+                sys.exit(1)
+
+
+        print("Credentials validated.")
 
         try:
-            print("🔗 Connecting to GitHub target and cloning repo(s)...")
+            print("Connecting to GitHub target and cloning repo(s)...")
             target = connect_github_target(
                 raw_url=args.github_url,
                 token=args.token,
             )
 
             if hasattr(target, 'owner'):
-                print(f"✅ Connected to project: {target.owner} ({target.repo_count} repos)")
+                print(f"Connected to project: {target.owner} ({target.repo_count} repos)")
             else:
-                print(f"✅ Connected to repository: {target.ref.slug}")
+                print(f"Connected to repository: {target.ref.slug}")
 
             repo_paths = repo_paths_from_connected(target)
 
             if args.release_notes:
-                print("📝 Generating release notes...")
+                print("Generating release notes...")
                 result = generate_release_notes(repo_paths=repo_paths)
                 print("\n" + "="*50)
                 print("RELEASE NOTES")
                 print("="*50)
                 print(result["answer"])
                 if RELEASE_NOTES_PATH.exists():
-                    print(f"\n📄 Release notes also saved to: {RELEASE_NOTES_PATH}")
+                    print(f"\nRelease notes also saved to: {RELEASE_NOTES_PATH}")
             else:
-                print(f"🤔 Processing query: {args.query}")
+                print(f"Processing query: {args.query}")
                 result = run_reader_agent(
                     query=args.query,
                     repo_paths=repo_paths,
@@ -130,13 +143,13 @@ Requirements:
                 pass  # Ignore cleanup errors
 
         except ValueError as exc:
-            print(f"❌ Invalid GitHub URL: {exc}")
+            print(f"ERROR: Invalid GitHub URL: {exc}")
             sys.exit(1)
         except RuntimeError as exc:
-            print(f"❌ GitHub connection failed: {exc}")
+            print(f"ERROR: GitHub connection failed: {exc}")
             sys.exit(1)
         except Exception as exc:
-            print(f"❌ Unexpected error: {exc}")
+            print(f"ERROR: Unexpected error: {exc}")
             sys.exit(1)
 
     run_cli()
@@ -704,6 +717,10 @@ def _render_team_tab(connected, repo_paths) -> None:
 # Render the tabs
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# Render the tabs
+# -----------------------------------------------------------------------------
+
 ask_tab, team_tab = st.tabs(["💬 Ask", "👥 Team"])
 
 with ask_tab:
@@ -711,18 +728,3 @@ with ask_tab:
 
 with team_tab:
     _render_team_tab(connected, repo_paths)
-
-
-
-# -----------------------------------------------------------------------------
-# Main entry point
-# -----------------------------------------------------------------------------
-
-
-if __name__ == "__main__":
-    # Check if running with CLI arguments
-    if len(sys.argv) > 1:
-        run_cli()
-    else:
-        # Run Streamlit app
-        pass  # Streamlit handles the rest automatically

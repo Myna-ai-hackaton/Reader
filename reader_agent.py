@@ -91,19 +91,43 @@ Return ONLY a single valid JSON object with this exact shape:
   "reason": "short explanation"
 }
 
+DATABASE SCHEMA GUIDE:
+The JSON memory contains two primary collections under the "Writer" document: "prs" and "developers". 
+
+1. FOR DEVELOPER QUESTIONS (Who is best, skills, comparisons, performance):
+Look inside the `developers` object. Every developer has a profile keyed by their GitHub handle. 
+Key fields to use for answering:
+- `overall_metrics`: Contains their total PRs merged/denied, average complexity, documentation, resilience, and quality scores. 
+- `skills`: A matrix of their coding skills, including experience level (Junior/Mid/Senior) and XP points.
+- `archetype_distribution`: Shows their coding style (architect, plumber, janitor, bug_squasher).
+- `projects`: Shows which repos they contribute to and their primary archetype per project.
+
+2. FOR CODE & PR QUESTIONS (What changed, who wrote what, risk, release notes):
+Look inside the `prs` object. Every PR is logged with a unique ID (e.g., repo_name_pr_123).
+Key fields to use for answering:
+- `author`: Who submitted the PR.
+- `timestamp`: When the PR was published/summarized.
+- `pr_overview`: A high-level summary of the PR.
+- `changes`: An array of specific changes, including a "category" (Feature/Bug Fix/Refactor), a "technical_description" for devs, and a "business_description" for PMs.
+- `risk_assessment`: The risk level (Low/Medium/High) and the reasoning behind it.
+- `core_files_touched`: An array of the main files modified in the PR.
+
 Rules:
 - Do not assume a fixed JSON schema. The Firebase memory could have ANY structure.
 - Treat collection names, document IDs, and nested JSON keys as meaningful evidence.
 - If the query asks what is stored in Firebase, list the projects/developers/PRs/data
   visible in the JSON memory.
-- If the query asks for an exact code location, implementation details, root cause
-  analysis, or line-level details, set needs_repo_deep_dive = true.
 - If the Firebase memory is enough for a high-level PM / QA / release-notes /
   data-inventory answer, set can_answer_from_memory = true and needs_repo_deep_dive = false.
+- For questions about recent activity, PRs, merges, or code changes: Even if Firebase lacks this data,
+  set needs_repo_deep_dive = true to check Git history, commit logs, and repository activity.
+- For questions about current state (open PRs, issues, active branches): Even if Firebase lacks this data,
+  set needs_repo_deep_dive = true to inspect repository status and recent activity.
 - Pull likely_repositories, likely_files, likely_commits, likely_keywords, and likely_symbols from
   whatever the memory actually contains — do not invent exact repos, paths, or commits.
 - If the user asks to verify, check the repo, inspect actual code, or find evidence in code,
   set needs_repo_deep_dive = true.
+- For time-based questions (last 2 weeks, recent activity), always consider deep-dive to check Git logs.
 - Output ONLY the JSON object. No prose before or after.
 """
 
@@ -124,18 +148,44 @@ Critical interpretation rule:
 - Do NOT confuse "Firebase credential handling" mentioned inside a PR summary with the
   question of what data is currently stored in Firebase.
 
+DATABASE SCHEMA GUIDE:
+The JSON memory contains two primary collections under the "Writer" document: "prs" and "developers". 
+
+1. FOR DEVELOPER QUESTIONS (Who is best, skills, comparisons, performance):
+Look inside the `developers` object. Every developer has a profile keyed by their GitHub handle. 
+Key fields to use for answering:
+- `overall_metrics`: Contains their total PRs merged/denied, average complexity, documentation, resilience, and quality scores. 
+- `skills`: A matrix of their coding skills, including experience level (Junior/Mid/Senior) and XP points.
+- `archetype_distribution`: Shows their coding style (architect, plumber, janitor, bug_squasher).
+- `projects`: Shows which repos they contribute to and their primary archetype per project.
+
+2. FOR CODE & PR QUESTIONS (What changed, who wrote what, risk, release notes):
+Look inside the `prs` object. Every PR is logged with a unique ID (e.g., repo_name_pr_123).
+Key fields to use for answering:
+- `author`: Who submitted the PR.
+- `timestamp`: When the PR was published/summarized.
+- `pr_overview`: A high-level summary of the PR.
+- `changes`: An array of specific changes, including a "category" (Feature/Bug Fix/Refactor), a "technical_description" for devs, and a "business_description" for PMs.
+- `risk_assessment`: The risk level (Low/Medium/High) and the reasoning behind it.
+- `core_files_touched`: An array of the main files modified in the PR.
 Rules:
 - Do not assume a fixed schema for the Firebase memory. It may have any structure.
 - Use ONLY the evidence provided. Do not invent commits, files, tickets, PRs,
   developers, projects, or metrics that are not in the evidence.
 - Cite repository names, PR numbers, developer handles, file paths, function/class names,
   and line numbers whenever the evidence provides them.
-- If the evidence is insufficient to answer fully, say clearly what is missing.
+- If the evidence is insufficient to answer fully, say clearly what is missing AND provide actionable alternatives:
+  * For PR/merge questions: Suggest checking GitHub directly, using Git commands like 'git log --oneline --since="2 weeks ago"', or setting up PR tracking in Firebase
+  * For open issues/PRs: Recommend GitHub API queries, manual repository checks, or implementing issue tracking
+  * For code locations: Suggest grep searches, file exploration, or code review processes
+  * For metrics/data: Propose data collection strategies or alternative data sources
+- When data is missing, focus on what CAN be done rather than just what cannot
 - Tailor the tone to the audience:
-    * PMs: focus on product / business impact, user-facing changes, risk.
-    * QA:  give concrete test recommendations and risk areas.
-    * Developers: include technical details, files, commits, and implementation clues.
+    * PMs: focus on product / business impact, user-facing changes, risk, and concrete next steps
+    * QA:  give concrete test recommendations, risk areas, and verification approaches
+    * Developers: include technical details, files, commits, implementation clues, and debugging strategies
 - Keep the answer well-structured with short headings or bullets when useful.
+- Always provide value even when complete data is unavailable - suggest investigation approaches, workarounds, or data collection improvements.
 """
 
 
