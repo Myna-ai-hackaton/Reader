@@ -27,31 +27,69 @@ from openai import OpenAI
 # Load .env once at import time. Real env vars still win over .env values.
 load_dotenv()
 
+LLM_CALL_COUNT = 0
+
 
 # -----------------------------------------------------------------------------
 # Client + model wiring
 # -----------------------------------------------------------------------------
 
+
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
 def get_client() -> OpenAI:
     """
-    Build an OpenAI client configured for whatever endpoint is in the env.
+    Build an OpenAI-compatible client.
 
-    - If OPENAI_BASE_URL is set, point the client at it (Podman AI Lab or any
-      other OpenAI-compatible server). API key is usually irrelevant for local
-      servers, so it defaults to "not-needed".
-    - Otherwise, talk to the real OpenAI cloud and use OPENAI_API_KEY as-is.
+    Supported modes:
+    - LLM_PROVIDER=gemini  -> direct Gemini API through Google's OpenAI-compatible endpoint
+    - LLM_PROVIDER=openai  -> OpenAI cloud
+    - OPENAI_BASE_URL set  -> local/OpenAI-compatible server, e.g. Podman
     """
+    provider = os.getenv("LLM_PROVIDER", "openai").lower().strip()
+
+    if provider in {"gemini", "google"}:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "Missing GEMINI_API_KEY. Put it in your .env file."
+            )
+
+        return OpenAI(
+            api_key=api_key,
+            base_url=GEMINI_OPENAI_BASE_URL,
+        )
+
     base_url = os.getenv("OPENAI_BASE_URL")
-    api_key = os.getenv("OPENAI_API_KEY", "not-needed")
+    api_key = os.getenv("OPENAI_API_KEY", "not-needed" if base_url else "")
 
     if base_url:
         return OpenAI(base_url=base_url, api_key=api_key)
+
+    if not api_key:
+        raise RuntimeError(
+            "Missing OPENAI_API_KEY. Put it in your .env file, "
+            "or set LLM_PROVIDER=gemini and GEMINI_API_KEY."
+        )
+
     return OpenAI(api_key=api_key)
 
 
 def get_model() -> str:
-    """Return the configured model name, with a sensible cloud default."""
-    return os.getenv("LLM_MODEL", "gpt-4.1-mini")
+    """Return the configured model name."""
+    provider = os.getenv("LLM_PROVIDER", "openai").lower().strip()
+
+    if provider in {"gemini", "google"}:
+        return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+    return (
+        os.getenv("OPENAI_MODEL")
+        or os.getenv("LLM_MODEL")
+        or "gpt-4.1-mini"
+    )
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -65,6 +103,11 @@ def chat(system: str, user: str, temperature: float = 0.1) -> str:
     Returns the assistant's text content, or an empty string if the API
     returned no content for any reason.
     """
+
+    global LLM_CALL_COUNT
+    LLM_CALL_COUNT += 1
+    print(f"[LLM CALL #{LLM_CALL_COUNT}] model={get_model()}")
+
     client = get_client()
     response = client.chat.completions.create(
         model=get_model(),

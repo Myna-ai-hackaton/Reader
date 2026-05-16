@@ -406,6 +406,7 @@ def connect_repo(
                     "--depth",
                     str(depth),
                     "--single-branch",
+                    "--no-recurse-submodules",
                     *(
                         ["--branch", ref.branch]
                         if ref.branch

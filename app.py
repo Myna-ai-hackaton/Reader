@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+import os
 
 # Check if running in CLI mode before importing Streamlit
 if __name__ == "__main__" and len(sys.argv) > 1:
@@ -78,14 +79,26 @@ Requirements:
             sys.exit(1)
 
         # Check OpenAI API configuration
-        import os
-        openai_base_url = os.getenv("OPENAI_BASE_URL")
-        openai_api_key = os.getenv("OPENAI_API_KEY")
+        llm_provider = os.getenv("LLM_PROVIDER", "openai").lower().strip()
 
-        if not openai_base_url and not openai_api_key:
-            print("ERROR: OpenAI API configuration missing.")
-            print("   Set OPENAI_API_KEY for cloud API or OPENAI_BASE_URL for local models.")
-            sys.exit(1)
+        if llm_provider in {"gemini", "google"}:
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+
+            if not gemini_api_key:
+                print("ERROR: Gemini API configuration missing.")
+                print("   Set GEMINI_API_KEY in your .env file.")
+                sys.exit(1)
+
+        else:
+            openai_base_url = os.getenv("OPENAI_BASE_URL")
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+
+            if not openai_base_url and not openai_api_key:
+                print("ERROR: OpenAI API configuration missing.")
+                print("   Set OPENAI_API_KEY for cloud API or OPENAI_BASE_URL for local models.")
+                print("   Or set LLM_PROVIDER=gemini and GEMINI_API_KEY.")
+                sys.exit(1)
+
 
         print("Credentials validated.")
 

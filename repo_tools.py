@@ -157,7 +157,7 @@ def _unique_preserve_order(items: list[str]) -> list[str]:
     return out
 
 
-def run_git(repo_path: str, args: list[str]) -> str:
+def run_git_old(repo_path: str, args: list[str]) -> str:
     """
     Run `git <args>` inside `repo_path` and return stdout.
 
@@ -186,6 +186,45 @@ def run_git(repo_path: str, args: list[str]) -> str:
 
     return result.stdout.strip()
 
+
+def run_git(repo_path: str, args: list[str]) -> str:
+    """
+    Safely run read-only git commands inside a cloned repo.
+
+    Important:
+    - No shell=True, so repo/user strings are not interpreted by the shell.
+    - Disables terminal prompts so Git cannot hang asking for credentials.
+    - Disables system Git config.
+    - Uses --no-optional-locks to avoid unnecessary repo locking.
+    """
+    repo = Path(repo_path).expanduser().resolve()
+
+    if not repo.exists():
+        raise FileNotFoundError(f"Repository path does not exist: {repo}")
+
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+
+    result = subprocess.run(
+        ["git", "--no-optional-locks", *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        env=env,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed with exit code {result.returncode}:\n"
+            f"{result.stderr.strip()}"
+        )
+
+    return result.stdout.strip()
 
 # -----------------------------------------------------------------------------
 # Repo validation and overview
@@ -442,7 +481,22 @@ def extract_code_outline(repo_path: str, file_path: str, *, max_symbols: int = 8
 
 def git_show_commit(repo_path: str, sha: str, max_chars: int = MAX_COMMAND_OUTPUT) -> str:
     """Return a truncated `git show --stat --patch` for a single commit."""
-    out = run_git(repo_path, ["show", "--stat", "--patch", "--unified=3", sha])
+    sha = str(sha).strip()
+
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+        raise ValueError(f"refusing suspicious commit id: {sha!r}")
+
+    out = run_git(
+        repo_path,
+        [
+            "show",
+            "--no-ext-diff",
+            "--stat",
+            "--patch",
+            "--unified=3",
+            sha,
+        ],
+    )
     return _truncate(out, max_chars)
 
 

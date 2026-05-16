@@ -142,7 +142,7 @@ PASS = true if accuracy >= 3 AND quality >= 3, else false.
 Respond ONLY with valid JSON (no markdown):
 {"accuracy": N, "quality": N, "reasoning": "2-3 sentence critique", "pass": true|false}"""
 
-DEFAULT_MODEL = "anthropic/claude-sonnet-4"
+DEFAULT_MODEL = "google/gemini-2.5-flash"
 
 
 def make_client(api_key: str) -> OpenAI:
